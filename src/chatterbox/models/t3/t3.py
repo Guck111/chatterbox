@@ -540,4 +540,10 @@ class T3(nn.Module):
 
         attn_matrix = torch.softmax(torch.stack(attn_weights), dim=-1)  # (T, N)
         monotonic_path = _viterbi_monotonic(attn_matrix)
+
+        print(f"[debug] attn_matrix shape: {attn_matrix.shape}")
+        print(f"[debug] path[:20]: {monotonic_path[:20]}")
+        print(f"[debug] path[-20:]: {monotonic_path[-20:]}")
+        print(f"[debug] unique text indices used: {sorted(set(monotonic_path))}")
+        print(f"[debug] num_text_tokens: {attn_matrix.shape[1]}")
         return all_tokens, monotonic_path
