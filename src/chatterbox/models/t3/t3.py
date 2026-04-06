@@ -58,6 +58,7 @@ class T3(nn.Module):
 
         if self.is_gpt:
             self.cfg = GPT2Config(**config_dict)
+            self.cfg._attn_implementation = "eager"
             self.tfmr = GPT2Model(self.cfg)
         else:
             self.cfg = LlamaConfig(**config_dict)
