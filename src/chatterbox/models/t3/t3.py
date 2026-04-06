@@ -61,6 +61,7 @@ class T3(nn.Module):
             self.tfmr = GPT2Model(self.cfg)
         else:
             self.cfg = LlamaConfig(**config_dict)
+            self.cfg._attn_implementation = "eager"
             self.tfmr = LlamaModel(self.cfg)
 
         self.dim = self.cfg.hidden_size
