@@ -37,6 +37,35 @@ def _ensure_BOT_EOT(text_tokens: Tensor, hp):
     assert (text_tokens == hp.stop_text_token).int().sum() >= B, "missing stop_text_token"
 
 
+def _viterbi_monotonic(attn_matrix: torch.Tensor) -> list[int]:
+    """
+    attn_matrix: (num_speech_steps, num_text_tokens) — сырые attention веса
+    Возвращает монотонный путь: список text_idx для каждого speech step.
+    """
+    T, N = attn_matrix.shape
+    log_a = torch.log(attn_matrix.clamp(min=1e-9))
+
+    dp = torch.full((T, N), float('-inf'))
+    bp = torch.zeros((T, N), dtype=torch.long)
+    dp[0] = log_a[0]
+
+    for t in range(1, T):
+        for i in range(N):
+            # можно остаться на i или перейти с любого j <= i
+            candidates = dp[t-1, :i+1]
+            best_j = candidates.argmax()
+            dp[t, i] = log_a[t, i] + candidates[best_j]
+            bp[t, i] = best_j
+
+    # traceback
+    path = [0] * T
+    path[T-1] = dp[T-1].argmax().item()
+    for t in range(T-2, -1, -1):
+        path[t] = bp[t+1, path[t+1]].item()
+
+    return path
+
+
 class T3(nn.Module):
     """
     Token-To-Token (T3) TTS model using huggingface transformer models as backbones,
@@ -437,7 +466,7 @@ class T3(nn.Module):
         len_text = text_tokens.size(1)
 
         generated_speech_tokens = []
-        token_alignments = [] # <-- Хранилище таймингов
+        attn_weights = [] # <-- Хранилище таймингов
 
         # Первый проход
         llm_outputs = self.tfmr(
@@ -453,7 +482,7 @@ class T3(nn.Module):
         attn = llm_outputs.attentions[-1] # Берем последний слой трансформера
         # Усредняем по "головам", берем последний шаг, отрезаем только текстовую часть промпта
         text_attn = attn.mean(dim=1)[:, -1, len_cond : len_cond + len_text]
-        token_alignments.append(text_attn.argmax(dim=-1).item())
+        attn_weights.append(text_attn[0].cpu())
         # -----------------------------------------------------------------
 
         speech_hidden = hidden_states[:, -1:]
@@ -483,7 +512,7 @@ class T3(nn.Module):
             # --- Магия Attention ---
             attn = llm_outputs.attentions[-1]
             text_attn = attn.mean(dim=1)[:, -1, len_cond : len_cond + len_text]
-            token_alignments.append(text_attn.argmax(dim=-1).item())
+            attn_weights.append(text_attn[0].cpu())
             # -----------------------
 
             speech_logits = self.speech_head(hidden_states)
@@ -510,4 +539,7 @@ class T3(nn.Module):
             token_alignments = token_alignments[:-1]
 
         # ТЕПЕРЬ ФУНКЦИЯ ВОЗВРАЩАЕТ 2 ЗНАЧЕНИЯ
-        return all_tokens, token_alignments
+        attn_matrix = torch.stack(attn_weights[:all_tokens.size(1)])  # (T, N)
+        attn_matrix = torch.softmax(attn_matrix, dim=-1)
+        monotonic_path = _viterbi_monotonic(attn_matrix)
+        return all_tokens, monotonic_path
