@@ -425,24 +425,34 @@ class T3(nn.Module):
         if repetition_penalty != 1.0:
             logits_processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
 
-
         speech_start_token = self.hp.start_speech_token * torch.ones_like(text_tokens[:, :1])
-        embeds, _ = self.prepare_input_embeds(
+        embeds, len_cond = self.prepare_input_embeds(
             t3_cond=t3_cond,
             text_tokens=text_tokens,
             speech_tokens=speech_start_token,
             cfg_weight=0.0,
         )
+        len_text = text_tokens.size(1)
 
         generated_speech_tokens = []
+        token_alignments = [] # <-- Хранилище таймингов
 
+        # Первый проход
         llm_outputs = self.tfmr(
             inputs_embeds=embeds,
-            use_cache=True
+            use_cache=True,
+            output_attentions=True # <-- Включаем выдачу Attention
         )
 
         hidden_states = llm_outputs[0]
         past_key_values = llm_outputs.past_key_values
+        
+        # --- Магия Attention: находим на какой текст мы сейчас смотрим ---
+        attn = llm_outputs.attentions[-1] # Берем последний слой трансформера
+        # Усредняем по "головам", берем последний шаг, отрезаем только текстовую часть промпта
+        text_attn = attn.mean(dim=1)[:, -1, len_cond : len_cond + len_text]
+        token_alignments.append(text_attn.argmax(dim=-1).item())
+        # -----------------------------------------------------------------
 
         speech_hidden = hidden_states[:, -1:]
         speech_logits = self.speech_head(speech_hidden)
@@ -457,14 +467,23 @@ class T3(nn.Module):
         for _ in tqdm(range(max_gen_len)):
             current_speech_embed = self.speech_emb(current_speech_token)
 
+            # Последующие проходы (генерация по 1 токену)
             llm_outputs = self.tfmr(
                 inputs_embeds=current_speech_embed,
                 past_key_values=past_key_values,
-                use_cache=True
+                use_cache=True,
+                output_attentions=True # <-- Включаем выдачу Attention
             )
 
             hidden_states = llm_outputs[0]
             past_key_values = llm_outputs.past_key_values
+            
+            # --- Магия Attention ---
+            attn = llm_outputs.attentions[-1]
+            text_attn = attn.mean(dim=1)[:, -1, len_cond : len_cond + len_text]
+            token_alignments.append(text_attn.argmax(dim=-1).item())
+            # -----------------------
+
             speech_logits = self.speech_head(hidden_states)
 
             input_ids = torch.cat(generated_speech_tokens, dim=1)
@@ -486,5 +505,7 @@ class T3(nn.Module):
         # Remove EOS token if present
         if all_tokens.size(1) > 0 and all_tokens[0, -1] == self.hp.stop_speech_token:
             all_tokens = all_tokens[:, :-1]
+            token_alignments = token_alignments[:-1]
 
-        return all_tokens
+        # ТЕПЕРЬ ФУНКЦИЯ ВОЗВРАЩАЕТ 2 ЗНАЧЕНИЯ
+        return all_tokens, token_alignments

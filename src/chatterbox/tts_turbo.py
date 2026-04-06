@@ -268,10 +268,11 @@ class ChatterboxTurboTTS:
 
         # Norm and tokenize text
         text = punc_norm(text)
-        text_tokens = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-        text_tokens = text_tokens.input_ids.to(self.device)
+        text_tokens_obj = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+        text_tokens = text_tokens_obj.input_ids.to(self.device)
 
-        speech_tokens = self.t3.inference_turbo(
+        # Получаем Звуковые токены И Массив Внимания
+        speech_tokens, token_alignments = self.t3.inference_turbo(
             t3_cond=self.conds.t3,
             text_tokens=text_tokens,
             temperature=temperature,
@@ -280,11 +281,68 @@ class ChatterboxTurboTTS:
             repetition_penalty=repetition_penalty,
         )
 
-        # Remove OOV tokens and add silence to end
-        speech_tokens = speech_tokens[speech_tokens < 6561]
+        # Убираем OOV токены и чистим массив alignments синхронно
+        valid_mask = speech_tokens < 6561
+        speech_tokens = speech_tokens[valid_mask]
+        token_alignments = [a for i, a in enumerate(token_alignments) if valid_mask[0, i].item()]
+
         speech_tokens = speech_tokens.to(self.device)
         silence = torch.tensor([S3GEN_SIL, S3GEN_SIL, S3GEN_SIL]).long().to(self.device)
         speech_tokens = torch.cat([speech_tokens, silence])
+
+        # --- ГЕНЕРАЦИЯ ИДЕАЛЬНЫХ ТАЙМИНГОВ ---
+        # 1 токен в Chatterbox = 25Hz = ровно 40 миллисекунд (0.04 сек)
+        TIME_PER_TOKEN = 0.04
+        
+        # Мапим индекс текста на список индексов акустических фреймов
+        text_to_speech_steps = {}
+        for step_idx, txt_idx in enumerate(token_alignments):
+            if txt_idx not in text_to_speech_steps:
+                text_to_speech_steps[txt_idx] = []
+            text_to_speech_steps[txt_idx].append(step_idx)
+
+        words_alignment = []
+        current_word = ""
+        current_word_start = -1
+        current_word_end = -1
+
+        for txt_idx, token_id in enumerate(text_tokens[0]):
+            token_str = self.tokenizer.decode([token_id])
+            if not token_str.strip():
+                continue
+                
+            # Пробел в начале токена означает начало нового слова
+            if token_str.startswith(" ") and current_word:
+                clean = current_word.strip(" .,!?")
+                if clean:
+                    words_alignment.append({
+                        "word": clean,
+                        "start": round(current_word_start, 3),
+                        "end": round(current_word_end, 3)
+                    })
+                current_word = ""
+                
+            steps = text_to_speech_steps.get(txt_idx, [])
+            if steps:
+                step_start = min(steps) * TIME_PER_TOKEN
+                step_end = (max(steps) + 1) * TIME_PER_TOKEN
+                
+                if current_word == "":
+                    current_word_start = step_start
+                current_word_end = max(current_word_end, step_end)
+                
+            current_word += token_str
+            
+        # Добавляем последнее слово
+        if current_word:
+            clean = current_word.strip(" .,!?")
+            if clean:
+                words_alignment.append({
+                    "word": clean,
+                    "start": round(current_word_start, 3),
+                    "end": round(current_word_end, 3)
+                })
+        # -------------------------------------
 
         wav, _ = self.s3gen.inference(
             speech_tokens=speech_tokens,
@@ -293,4 +351,6 @@ class ChatterboxTurboTTS:
         )
         wav = wav.squeeze(0).detach().cpu().numpy()
         watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-        return torch.from_numpy(watermarked_wav).unsqueeze(0)
+        
+        # Теперь возвращаем КОРТЕЖ: звук и тайминги
+        return torch.from_numpy(watermarked_wav).unsqueeze(0), words_alignment
