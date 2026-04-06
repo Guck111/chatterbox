@@ -272,7 +272,7 @@ class ChatterboxTurboTTS:
         text_tokens = text_tokens_obj.input_ids.to(self.device)
 
         # Получаем Звуковые токены И Массив Внимания
-        speech_tokens, token_alignments = self.t3.inference_turbo(
+        speech_tokens, attn_weights = self.t3.inference_turbo(
             t3_cond=self.conds.t3,
             text_tokens=text_tokens,
             temperature=temperature,
@@ -284,7 +284,7 @@ class ChatterboxTurboTTS:
         # Убираем OOV токены и чистим массив alignments синхронно
         valid_mask = speech_tokens < 6561
         speech_tokens = speech_tokens[valid_mask]
-        token_alignments = [a for i, a in enumerate(token_alignments) if valid_mask[0, i].item()]
+        attn_weights = [a for i, a in enumerate(attn_weights) if valid_mask[0, i].item()]
 
         speech_tokens = speech_tokens.to(self.device)
         silence = torch.tensor([S3GEN_SIL, S3GEN_SIL, S3GEN_SIL]).long().to(self.device)
@@ -296,7 +296,7 @@ class ChatterboxTurboTTS:
         
         # Мапим индекс текста на список индексов акустических фреймов
         text_to_speech_steps = {}
-        for step_idx, txt_idx in enumerate(token_alignments):
+        for step_idx, txt_idx in enumerate(attn_weights):
             if txt_idx not in text_to_speech_steps:
                 text_to_speech_steps[txt_idx] = []
             text_to_speech_steps[txt_idx].append(step_idx)

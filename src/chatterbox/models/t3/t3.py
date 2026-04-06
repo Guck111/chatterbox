@@ -536,10 +536,8 @@ class T3(nn.Module):
         # Remove EOS token if present
         if all_tokens.size(1) > 0 and all_tokens[0, -1] == self.hp.stop_speech_token:
             all_tokens = all_tokens[:, :-1]
-            token_alignments = token_alignments[:-1]
+            attn_weights = attn_weights[:-1]
 
-        # ТЕПЕРЬ ФУНКЦИЯ ВОЗВРАЩАЕТ 2 ЗНАЧЕНИЯ
-        attn_matrix = torch.stack(attn_weights[:all_tokens.size(1)])  # (T, N)
-        attn_matrix = torch.softmax(attn_matrix, dim=-1)
+        attn_matrix = torch.softmax(torch.stack(attn_weights), dim=-1)  # (T, N)
         monotonic_path = _viterbi_monotonic(attn_matrix)
         return all_tokens, monotonic_path
